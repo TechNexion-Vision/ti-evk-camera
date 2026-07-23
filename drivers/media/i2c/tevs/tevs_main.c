@@ -9,6 +9,7 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <media/media-entity.h>
+#include <media/mipi-csi2.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -87,6 +88,8 @@
 #define HOST_COMMAND_ISP_CTRL_TRIGGER_MODE 						(0x317A)
 #define HOST_COMMAND_ISP_CTRL_FLICK_CTRL					 	(0x317C)
 #define HOST_COMMAND_ISP_CTRL_MIPI_FREQ 						(0x317E)
+#define HOST_COMMAND_ISP_CTRL_JPEG_QUAL							(0x3180)
+#define HOST_COMMAND_ISP_CTRL_PREVIEW_MIPI_CTRL 				(0x3182)
 
 /* Define host command register of ISP bootdata page */
 #define HOST_COMMAND_ISP_BOOTDATA_1                             (0x4000)
@@ -269,6 +272,8 @@
 #define TEVS_BOOT_TIME						(250)
 #define TOTAL_MICROSEC_PERSEC               (1000000)
 
+#define TEVS_IMG_FORMAT_UYVY				(0x50)
+
 struct header_info {
 	u8 header_version;
 	u16 content_offset;
@@ -314,6 +319,7 @@ struct tevs {
 	bool hw_reset_mode;
 	bool trigger_mode;
 	char *sensor_name;
+	int vc_id;
 
 	struct mutex lock; /* Protects formats */
 	/* V4L2 Controls */
@@ -573,6 +579,17 @@ static int tevs_power_on(struct tevs *tevs)
 			dev_err(tevs->dev, "set trigger mode failed\n");
 			return ret;
 		}
+
+		ret += tevs_i2c_write_16b(
+			tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_FORMAT,
+			TEVS_IMG_FORMAT_UYVY);
+		ret += tevs_i2c_write_16b(
+			tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_HINF_CTRL,
+			0x10 | (tevs->continuous_clock << 5) |
+				(tevs->data_lanes));
+		ret += tevs_i2c_write_16b(
+			tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_MIPI_CTRL,
+			tevs->vc_id);
 	}
 
 	return ret;
@@ -605,16 +622,17 @@ static int tevs_power(struct v4l2_subdev *sub_dev, int on)
 		return tevs_power_off(tevs);
 }
 
-static int tevs_get_frame_interval(struct v4l2_subdev *sub_dev,
+static int tevs_get_frame_interval(struct v4l2_subdev *sd,
+				   struct v4l2_subdev_state *state,
 				   struct v4l2_subdev_frame_interval *fi)
 {
-	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
+	struct tevs *tevs = container_of(sd, struct tevs, v4l2_subdev);
 	u32 max_fps;
 
 	if (fi->pad != 0)
 		return -EINVAL;
 
-	dev_dbg(sub_dev->dev, "%s()\n", __func__);
+	dev_dbg(sd->dev, "%s()\n", __func__);
 
 	max_fps = tevs_sensor_table[tevs->selected_sensor]
 			  .res_list[tevs->selected_mode]
@@ -626,16 +644,17 @@ static int tevs_get_frame_interval(struct v4l2_subdev *sub_dev,
 	return 0;
 }
 
-static int tevs_set_frame_interval(struct v4l2_subdev *sub_dev,
+static int tevs_set_frame_interval(struct v4l2_subdev *sd,
+				   struct v4l2_subdev_state *state,
 				   struct v4l2_subdev_frame_interval *fi)
 {
-	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
+	struct tevs *tevs = container_of(sd, struct tevs, v4l2_subdev);
 	u32 max_fps;
 
 	if (fi->pad != 0)
 		return -EINVAL;
 
-	dev_dbg(sub_dev->dev, "%s()\n", __func__);
+	dev_dbg(sd->dev, "%s()\n", __func__);
 
 	max_fps = tevs_sensor_table[tevs->selected_sensor]
 			  .res_list[tevs->selected_mode]
@@ -665,10 +684,10 @@ static int tevs_set_stream(struct v4l2_subdev *sub_dev, int enable)
 		if (!(tevs->hw_reset_mode | tevs->trigger_mode))
 			ret = tevs_standby(tevs, 1);
 	} else {
-		if (!(tevs->hw_reset_mode | tevs->trigger_mode))
-			ret = tevs_standby(tevs, 0);
+		//if (!(tevs->hw_reset_mode | tevs->trigger_mode))
+		//	ret = tevs_standby(tevs, 0);
 
-		if (ret == 0) {
+		//if (ret == 0) {
 			int fps = tevs_sensor_table[tevs->selected_sensor]
 					  .res_list[tevs->selected_mode]
 					  .framerates;
@@ -680,13 +699,16 @@ static int tevs_set_stream(struct v4l2_subdev *sub_dev, int enable)
 				tevs_sensor_table[tevs->selected_sensor]
 					.res_list[tevs->selected_mode]
 					.height);
+
 			tevs_i2c_write_16b(tevs,
-					   HOST_COMMAND_ISP_CTRL_PREVIEW_FORMAT,
-					   0x50);
+					HOST_COMMAND_ISP_CTRL_PREVIEW_FORMAT, 0x50);
 			tevs_i2c_write_16b(
 				tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_HINF_CTRL,
 				0x10 | (tevs->continuous_clock << 5) |
 					(tevs->data_lanes));
+			tevs_i2c_write_16b(
+				tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_MIPI_CTRL,
+				tevs->vc_id);
 			tevs_i2c_write_16b(
 				tevs, HOST_COMMAND_ISP_CTRL_PREVIEW_SENSOR_MODE,
 				tevs_sensor_table[tevs->selected_sensor]
@@ -710,12 +732,42 @@ static int tevs_set_stream(struct v4l2_subdev *sub_dev, int enable)
 			tevs_i2c_read(tevs, TEVS_AE_MANUAL_EXP_TIME, exp, 4);
 			tevs->exp_time->cur.val = be32_to_cpup((__be32 *)exp) &
 				  TEVS_AE_MANUAL_EXP_TIME_MASK;
-		}
+		//}
+		if (!(tevs->hw_reset_mode | tevs->trigger_mode))
+                	ret = tevs_standby(tevs, 0);
 	}
 
 	mutex_unlock(&tevs->lock);
 
 	return ret;
+}
+
+static int tevs_get_frame_desc(struct v4l2_subdev *sub_dev, unsigned int pad,
+                                struct v4l2_mbus_frame_desc *fd)
+{
+	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
+	if (pad != 0 || !fd)
+		return -EINVAL;
+
+	memset(fd, 0x0, sizeof(*fd));
+
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+	fd->entry[0].flags = 0;
+	fd->entry[0].pixelcode = tevs->fmt.code;
+	fd->entry[0].bus.csi2.vc = 0;
+	fd->entry[0].bus.csi2.dt =
+		tevs->fmt.code == MEDIA_BUS_FMT_SGRBG8_1X8 ?
+			MIPI_CSI2_DT_RAW8 :
+		tevs->fmt.code == MEDIA_BUS_FMT_SGRBG10_1X10 ?
+			MIPI_CSI2_DT_RAW10 :
+		tevs->fmt.code == MEDIA_BUS_FMT_SGRBG12_1X12 ?
+			MIPI_CSI2_DT_RAW12 :
+		tevs->fmt.code == MEDIA_BUS_FMT_SGRBG16_1X16 ?
+			MIPI_CSI2_DT_RAW16 :
+			MIPI_CSI2_DT_YUV422_8B;
+	fd->num_entries = 1;
+
+	return 0;
 }
 
 static int tevs_enum_mbus_code(struct v4l2_subdev *sub_dev,
@@ -751,7 +803,7 @@ static int tevs_get_fmt(struct v4l2_subdev *sub_dev,
 	dev_dbg(sub_dev->dev, "%s() which [%d]\n", __func__, format->which);
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt = v4l2_subdev_get_try_format(sub_dev, sd_state,
+		fmt = v4l2_subdev_state_get_format(sd_state,
 						 format->pad);
 	else
 		fmt = &tevs->fmt;
@@ -794,6 +846,7 @@ static int tevs_set_fmt(struct v4l2_subdev *sub_dev,
 	}
 
 	if (i >= tevs_sensor_table[tevs->selected_sensor].res_list_size) {
+		mutex_unlock(&tevs->lock);
 		return -EINVAL;
 	}
 	tevs->selected_mode = i;
@@ -812,7 +865,7 @@ static int tevs_set_fmt(struct v4l2_subdev *sub_dev,
 	memset(mbus_fmt->reserved, 0, sizeof(mbus_fmt->reserved));
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt = v4l2_subdev_get_try_format(sub_dev, sd_state, 0);
+		fmt = v4l2_subdev_state_get_format(sd_state, 0);
 	else
 		fmt = &tevs->fmt;
 
@@ -905,14 +958,14 @@ static int tevs_enum_frame_interval(struct v4l2_subdev *sub_dev,
 				tevs_sensor_table[tevs->selected_sensor]
 					.res_list[i]
 					.framerates;
-			break;
+			return 0;
 		}
 	}
 
 	dev_dbg(sub_dev->dev, "%s() frame rate [%u]\n", __func__,
 		fie->interval.denominator);
 
-	return 0;
+	return -EINVAL;
 }
 
 /*
@@ -1732,8 +1785,6 @@ static const struct v4l2_subdev_core_ops tevs_v4l2_subdev_core_ops = {
 };
 
 static const struct v4l2_subdev_video_ops tevs_v4l2_subdev_video_ops = {
-	.g_frame_interval = tevs_get_frame_interval,
-	.s_frame_interval = tevs_set_frame_interval,
 	.s_stream = tevs_set_stream,
 };
 
@@ -1744,6 +1795,9 @@ static const struct v4l2_subdev_pad_ops tevs_v4l2_subdev_pad_ops = {
 	.get_selection = tevs_get_selection,
 	.enum_frame_size = tevs_enum_frame_size,
 	.enum_frame_interval = tevs_enum_frame_interval,
+	.get_frame_interval = tevs_get_frame_interval,
+        .set_frame_interval = tevs_set_frame_interval,
+	.get_frame_desc = tevs_get_frame_desc,
 };
 
 static const struct v4l2_subdev_ops tevs_subdev_ops = {

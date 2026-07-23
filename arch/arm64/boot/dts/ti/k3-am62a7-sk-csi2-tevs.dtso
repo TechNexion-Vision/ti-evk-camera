@@ -43,10 +43,10 @@
 				compatible = "tn,tevs";
 				reg = <0x48>;
 
-				standby-gpios = <&pca9554_0 2 GPIO_ACTIVE_HIGH>;
+				standby-gpios = <&pca9554_a27_0 2 GPIO_ACTIVE_HIGH>;
 				reset-gpios = <&exp1 13 GPIO_ACTIVE_HIGH>;
 
-				data-lanes = <2>;
+				data-lanes = <4>;
 				data-frequency = <800>;
 				continuous-clock = <0>;
 				status = "okay";
@@ -54,9 +54,10 @@
 				port {
 					csi2_cam0: endpoint {
 						remote-endpoint = <&csi2rx0_in_sensor>;
-						link-frequencies = /bits/ 64 <456000000>;
+						link-frequencies = /bits/ 64 <400000000>;
 						clock-lanes = <0>;
 						data-lanes = <1 2 3 4>;
+						clock-noncontinuous;
 					};
 				};
 			};
@@ -79,6 +80,7 @@
 				bus-type = <4>; /* CSI2 DPHY. */
 				clock-lanes = <0>;
 				data-lanes = <1 2 3 4>;
+				clock-noncontinuous;
 			};
 		};
 	};
