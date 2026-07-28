@@ -2008,7 +2008,8 @@ static int tevs_probe(struct i2c_client *client)
 
 	/* link_freq = (pixel_rate * bpp) / (2 * data_lanes) */
 	tevs_link_freqs[0] =
-		(tevs_pixel_rates[0] * 16) / (2 * tevs->data_lanes);
+		400000000;
+		//(tevs_pixel_rates[0] * 16) / (2 * tevs->data_lanes);
 
 	ret = tevs_ctrls_init(tevs);
 	if (ret) {
