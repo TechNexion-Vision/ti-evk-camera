@@ -4,6 +4,7 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/media.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
@@ -21,6 +22,7 @@
 /* Define host command register of TEVS information page */
 #define HOST_COMMAND_TEVS_INFO_VERSION_MSB 						(0x3000)
 #define HOST_COMMAND_TEVS_INFO_VERSION_LSB 						(0x3002)
+#define HOST_COMMAND_TEVS_SENSOR_CHIP_ID						(0x3008)
 #define HOST_COMMAND_TEVS_BOOT_STATE 							(0x3004)
 
 /* Define host command register of ISP control page */
@@ -186,6 +188,10 @@
 #define TEVS_GAMMA_MASK 						(0xFFFF)
 #define TEVS_MAX_FPS							HOST_COMMAND_ISP_CTRL_PREVIEW_MAX_FPS
 #define TEVS_MAX_FPS_MASK 						(0x00FF)
+#define TEVS_DENOISE							HOST_COMMAND_ISP_CTRL_DENOISE
+#define TEVS_DENOISE_MAX						HOST_COMMAND_ISP_CTRL_DENOISE_MAX
+#define TEVS_DENOISE_MIN						HOST_COMMAND_ISP_CTRL_DENOISE_MIN
+#define TEVS_DENOISE_MASK						(0xFFFF)
 #define TEVS_AE_AUTO_EXP_TIME_UPPER				HOST_COMMAND_ISP_CTRL_PREVIEW_EXP_TIME_UPPER_MSB
 #define TEVS_AE_AUTO_EXP_TIME_MAX				HOST_COMMAND_ISP_CTRL_PREVIEW_EXP_TIME_MAX_MSB
 #define TEVS_AE_AUTO_EXP_TIME_MASK				(0xFFFFFFFF)
@@ -264,6 +270,9 @@
 #define V4L2_CID_USER_TEVS_BASE				(V4L2_CID_USER_BASE + 0x2000)
 #define V4L2_CID_TEVS_BSL_MODE				(V4L2_CID_USER_TEVS_BASE + 0)
 #define V4L2_CID_TEVS_MAX_FPS				(V4L2_CID_USER_TEVS_BASE + 1)
+#define V4L2_CID_TEVS_DENOISE				(V4L2_CID_USER_TEVS_BASE + 2)
+#define V4L2_CID_TEVS_AE_EXP_TIME_UPPER		(V4L2_CID_USER_TEVS_BASE + 3)
+#define V4L2_CID_TEVS_AE_EXP_TIME_MAX		(V4L2_CID_USER_TEVS_BASE + 4)
 #define TEVS_TRIGGER_CTRL_MODE_MASK 		(0x0001)
 #define TEVS_BSL_MODE_NORMAL_IDX 		    (0U << 0)
 #define TEVS_BSL_MODE_FLASH_IDX 			(1U << 0)
@@ -313,8 +322,12 @@ struct tevs {
 	int data_lanes;
 	int continuous_clock;
 	int data_frequency;
+	s64 link_freq_menu[1];
+	s64 pixel_rate_value;
 	u8 selected_mode;
 	u8 selected_sensor;
+	u16 chip_id;
+	unsigned int fps;
 	bool supports_over_4k_res;
 	bool hw_reset_mode;
 	bool trigger_mode;
@@ -346,6 +359,9 @@ struct tevs {
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_ctrl *bsl;
 	struct v4l2_ctrl *max_fps;
+	struct v4l2_ctrl *denoise;
+	struct v4l2_ctrl *ae_exp_upper;
+	struct v4l2_ctrl *ae_exp_max;
 };
 
 static const struct regmap_config tevs_regmap_config = {
@@ -492,6 +508,54 @@ int tevs_load_header_info(struct tevs *tevs)
 	}
 }
 
+static int tevs_get_chip_id(struct tevs *tevs)
+{
+	u16 value;
+	int ret;
+
+	ret = tevs_i2c_read_16b(tevs, HOST_COMMAND_TEVS_SENSOR_CHIP_ID,
+				&value);
+	if (ret < 0) {
+		dev_err(tevs->dev, "failed to read chip ID: %d\n", ret);
+		return ret;
+	}
+
+	tevs->chip_id = value;
+	dev_info(tevs->dev, "chip ID: 0x%04x\n", tevs->chip_id);
+	return 0;
+}
+
+static unsigned int tevs_res_fps_count(const struct resolution *res)
+{
+	return res->framerates && res->framerates_size ?
+		res->framerates_size : 0;
+}
+
+static unsigned int tevs_res_fps(const struct resolution *res,
+				 unsigned int index)
+{
+	if (res->framerates && index < res->framerates_size)
+		return res->framerates[index];
+	return 0;
+}
+
+static unsigned int tevs_nearest_fps(const struct resolution *res,
+				     unsigned int requested)
+{
+	unsigned int best = tevs_res_fps(res, 0);
+	unsigned int best_delta = best > requested ? best - requested : requested - best;
+	unsigned int i;
+
+	for (i = 1; i < tevs_res_fps_count(res); i++) {
+		unsigned int candidate = tevs_res_fps(res, i);
+		unsigned int delta = candidate > requested ? candidate - requested : requested - candidate;
+		if (delta < best_delta) {
+			best = candidate;
+			best_delta = delta;
+		}
+	}
+	return best;
+}
 static int tevs_standby(struct tevs *tevs, int enable)
 {
 	u16 v = 0xFFFF;
@@ -627,45 +691,36 @@ static int tevs_get_frame_interval(struct v4l2_subdev *sd,
 				   struct v4l2_subdev_frame_interval *fi)
 {
 	struct tevs *tevs = container_of(sd, struct tevs, v4l2_subdev);
-	u32 max_fps;
+	const struct resolution *res;
 
 	if (fi->pad != 0)
 		return -EINVAL;
-
-	dev_dbg(sd->dev, "%s()\n", __func__);
-
-	max_fps = tevs_sensor_table[tevs->selected_sensor]
-			  .res_list[tevs->selected_mode]
-			  .framerates;
-
+	res = &tevs_sensor_table[tevs->selected_sensor].res_list[tevs->selected_mode];
 	fi->interval.numerator = 1;
-	fi->interval.denominator = max_fps;
-
+	fi->interval.denominator = tevs->fps ? tevs->fps : tevs_res_fps(res, 0);
 	return 0;
 }
-
 static int tevs_set_frame_interval(struct v4l2_subdev *sd,
 				   struct v4l2_subdev_state *state,
 				   struct v4l2_subdev_frame_interval *fi)
 {
 	struct tevs *tevs = container_of(sd, struct tevs, v4l2_subdev);
-	u32 max_fps;
+	const struct resolution *res;
+	unsigned int requested;
 
-	if (fi->pad != 0)
+	if (fi->pad != 0 || !fi->interval.denominator)
 		return -EINVAL;
-
-	dev_dbg(sd->dev, "%s()\n", __func__);
-
-	max_fps = tevs_sensor_table[tevs->selected_sensor]
-			  .res_list[tevs->selected_mode]
-			  .framerates;
-
+	requested = fi->interval.numerator ?
+		fi->interval.denominator / fi->interval.numerator : fi->interval.denominator;
+	if (!requested)
+		return -EINVAL;
+	res = &tevs_sensor_table[tevs->selected_sensor].res_list[tevs->selected_mode];
+	tevs->fps = tevs_nearest_fps(res, requested);
 	fi->interval.numerator = 1;
-	fi->interval.denominator = max_fps;
-
+	fi->interval.denominator = tevs->fps;
+	dev_dbg(sd->dev, "requested %u fps, selected %u fps\n", requested, tevs->fps);
 	return 0;
 }
-
 static int tevs_set_stream(struct v4l2_subdev *sub_dev, int enable)
 {
 	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
@@ -688,9 +743,7 @@ static int tevs_set_stream(struct v4l2_subdev *sub_dev, int enable)
 		//	ret = tevs_standby(tevs, 0);
 
 		//if (ret == 0) {
-			int fps = tevs_sensor_table[tevs->selected_sensor]
-					  .res_list[tevs->selected_mode]
-					  .framerates;
+			unsigned int fps = tevs->fps;
 			dev_dbg(sub_dev->dev, "%s() width=%d, height=%d\n",
 				__func__,
 				tevs_sensor_table[tevs->selected_sensor]
@@ -775,13 +828,15 @@ static int tevs_enum_mbus_code(struct v4l2_subdev *sub_dev,
 			       struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
-	if (code->pad || code->index > 0)
+	if (code->pad ||
+	    code->index >= tevs_sensor_table[tevs->selected_sensor].code_list_size)
 		return -EINVAL;
 
 	mutex_lock(&tevs->lock);
 	dev_dbg(sub_dev->dev, "%s()\n", __func__);
 
-	code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	code->code = tevs_sensor_table[tevs->selected_sensor]
+			     .code_list[code->index];
 	mutex_unlock(&tevs->lock);
 
 	return 0;
@@ -850,6 +905,7 @@ static int tevs_set_fmt(struct v4l2_subdev *sub_dev,
 		return -EINVAL;
 	}
 	tevs->selected_mode = i;
+	tevs->fps = tevs_res_fps(&tevs_sensor_table[tevs->selected_sensor].res_list[i], 0);
 	dev_dbg(sub_dev->dev, "%s() selected mode index [%d]\n", __func__,
 		tevs->selected_mode);
 
@@ -857,7 +913,14 @@ static int tevs_set_fmt(struct v4l2_subdev *sub_dev,
 		tevs_sensor_table[tevs->selected_sensor].res_list[i].width;
 	mbus_fmt->height =
 		tevs_sensor_table[tevs->selected_sensor].res_list[i].height;
-	mbus_fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	for (i = 0;
+	     i < tevs_sensor_table[tevs->selected_sensor].code_list_size; i++)
+		if (mbus_fmt->code == tevs_sensor_table[tevs->selected_sensor]
+					       .code_list[i])
+			break;
+	if (i == tevs_sensor_table[tevs->selected_sensor].code_list_size)
+		mbus_fmt->code = tevs_sensor_table[tevs->selected_sensor]
+					 .code_list[0];
 	mbus_fmt->colorspace = V4L2_COLORSPACE_SRGB;
 	mbus_fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(mbus_fmt->colorspace);
 	mbus_fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
@@ -937,48 +1000,28 @@ static int tevs_enum_frame_interval(struct v4l2_subdev *sub_dev,
 				    struct v4l2_subdev_frame_interval_enum *fie)
 {
 	struct tevs *tevs = container_of(sub_dev, struct tevs, v4l2_subdev);
-	int i;
+	const struct resolution *res = NULL;
+	unsigned int i;
 
-	if ((fie->pad != 0) || (fie->index != 0))
+	if (fie->pad != 0)
 		return -EINVAL;
-
-	dev_dbg(sub_dev->dev, "%s() index [%u]\n", __func__, fie->index);
-
-	fie->interval.numerator = 1;
-
-	for (i = 0; i < tevs_sensor_table[tevs->selected_sensor].res_list_size;
-	     i++) {
-		if (fie->width == tevs_sensor_table[tevs->selected_sensor]
-					  .res_list[i]
-					  .width &&
-		    fie->height == tevs_sensor_table[tevs->selected_sensor]
-					   .res_list[i]
-					   .height) {
-			fie->interval.denominator =
-				tevs_sensor_table[tevs->selected_sensor]
-					.res_list[i]
-					.framerates;
-			return 0;
+	for (i = 0; i < tevs_sensor_table[tevs->selected_sensor].res_list_size; i++) {
+		const struct resolution *candidate =
+			&tevs_sensor_table[tevs->selected_sensor].res_list[i];
+		if (fie->width == candidate->width && fie->height == candidate->height) {
+			res = candidate;
+			break;
 		}
 	}
-
-	dev_dbg(sub_dev->dev, "%s() frame rate [%u]\n", __func__,
-		fie->interval.denominator);
-
-	return -EINVAL;
+	if (!res || fie->index >= tevs_res_fps_count(res))
+		return -EINVAL;
+	fie->interval.numerator = 1;
+	fie->interval.denominator = tevs_res_fps(res, fie->index);
+	return 0;
 }
-
 /*
  * V4L2 Controls
  */
-
-static s64 tevs_link_freqs[] = {
-	400000000,
-};
-
-static const u32 tevs_pixel_rates[] = {
-	200000000,
-};
 
 static const char *const awb_mode_strings[] = {
 	"Manual Temp Mode", // TEVS_AWB_CTRL_MODE_MANUAL_TEMP
@@ -1298,6 +1341,28 @@ static int tevs_set_max_fps(struct tevs *tevs, s32 value)
 	return ret;
 }
 
+static int tevs_set_denoise(struct tevs *tevs, s32 value)
+{
+	return tevs_i2c_write_16b(tevs, TEVS_DENOISE,
+				  value & TEVS_DENOISE_MASK);
+}
+
+static int tevs_set_ae_auto_exp_upper(struct tevs *tevs, s32 value)
+{
+	__be32 val = cpu_to_be32(value);
+
+	return tevs_i2c_write(tevs, TEVS_AE_AUTO_EXP_TIME_UPPER,
+			      (u8 *)&val, sizeof(val));
+}
+
+static int tevs_set_ae_auto_exp_max(struct tevs *tevs, s32 value)
+{
+	__be32 val = cpu_to_be32(value);
+
+	return tevs_i2c_write(tevs, TEVS_AE_AUTO_EXP_TIME_MAX,
+			      (u8 *)&val, sizeof(val));
+}
+
 static int tevs_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct tevs *tevs = container_of(ctrl->handler, struct tevs, ctrls);
@@ -1362,6 +1427,15 @@ static int tevs_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	case V4L2_CID_TEVS_MAX_FPS:
 		return tevs_set_max_fps(tevs, ctrl->val);
+
+	case V4L2_CID_TEVS_DENOISE:
+		return tevs_set_denoise(tevs, ctrl->val);
+
+	case V4L2_CID_TEVS_AE_EXP_TIME_UPPER:
+		return tevs_set_ae_auto_exp_upper(tevs, ctrl->val);
+
+	case V4L2_CID_TEVS_AE_EXP_TIME_MAX:
+		return tevs_set_ae_auto_exp_max(tevs, ctrl->val);
 
 	default:
 		dev_dbg(tevs->dev, "Unknown control 0x%x\n", ctrl->id);
@@ -1434,6 +1508,39 @@ static const struct v4l2_ctrl_config tevs_max_fps = {
 	.def = 30,
 };
 
+static const struct v4l2_ctrl_config tevs_denoise_ctrl = {
+	.ops = &tevs_ctrl_ops,
+	.id = V4L2_CID_TEVS_DENOISE,
+	.name = "Denoise",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = 0,
+	.max = 0x4000,
+	.step = 1,
+	.def = 0x2000,
+};
+
+static const struct v4l2_ctrl_config tevs_ae_exp_upper_ctrl = {
+	.ops = &tevs_ctrl_ops,
+	.id = V4L2_CID_TEVS_AE_EXP_TIME_UPPER,
+	.name = "Auto Exposure Time Upper",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = 1,
+	.max = 0x7fffffff,
+	.step = 1,
+	.def = 33333,
+};
+
+static const struct v4l2_ctrl_config tevs_ae_exp_max_ctrl = {
+	.ops = &tevs_ctrl_ops,
+	.id = V4L2_CID_TEVS_AE_EXP_TIME_MAX,
+	.name = "Auto Exposure Time Maximum",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = 1,
+	.max = 0x7fffffff,
+	.step = 1,
+	.def = 33333,
+};
+
 static int tevs_ctrls_init(struct tevs *tevs)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&tevs->v4l2_subdev);
@@ -1442,10 +1549,12 @@ static int tevs_ctrls_init(struct tevs *tevs)
 	int ret;
 	u16 val;
 	s64 ctrl_def, ctrl_max, ctrl_min;
+	s64 exp_ctrl_max, exp_ctrl_min;
 	u8 exp[4] = { 0 };
+	struct v4l2_ctrl_config ctrl_cfg;
 
 	ctrl_hdlr = &tevs->ctrls;
-	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 22);
+	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 25);
 	if (ret)
 		return ret;
 
@@ -1518,6 +1627,20 @@ static int tevs_ctrls_init(struct tevs *tevs)
 					V4L2_CID_GAMMA, ctrl_min, ctrl_max, 1,
 					ctrl_def);
 
+	ret = tevs_i2c_read_16b(tevs, TEVS_DENOISE, &val);
+	ctrl_def = val & TEVS_DENOISE_MASK;
+	ret += tevs_i2c_read_16b(tevs, TEVS_DENOISE_MAX, &val);
+	ctrl_max = val & TEVS_DENOISE_MASK;
+	ret += tevs_i2c_read_16b(tevs, TEVS_DENOISE_MIN, &val);
+	ctrl_min = val & TEVS_DENOISE_MASK;
+	if (ret)
+		goto error;
+	ctrl_cfg = tevs_denoise_ctrl;
+	ctrl_cfg.min = ctrl_min;
+	ctrl_cfg.max = ctrl_max;
+	ctrl_cfg.def = clamp_t(s64, ctrl_def, ctrl_min, ctrl_max);
+	tevs->denoise = v4l2_ctrl_new_custom(ctrl_hdlr, &ctrl_cfg, NULL);
+
 	ret = tevs_i2c_read(tevs, TEVS_AE_MANUAL_EXP_TIME, exp, 4);
 	ctrl_def = be32_to_cpup((__be32 *)exp) & TEVS_AE_MANUAL_EXP_TIME_MASK;
 	ret += tevs_i2c_read(tevs, TEVS_AE_MANUAL_EXP_TIME_MAX, exp, 4);
@@ -1529,6 +1652,29 @@ static int tevs_ctrls_init(struct tevs *tevs)
 	tevs->exp_time = v4l2_ctrl_new_std(ctrl_hdlr, &tevs_ctrl_ops,
 					   V4L2_CID_EXPOSURE, ctrl_min,
 					   ctrl_max, 1, ctrl_def);
+	exp_ctrl_min = min_t(s64, ctrl_min, 0x7fffffff);
+	exp_ctrl_max = min_t(s64, ctrl_max, 0x7fffffff);
+
+	ret = tevs_i2c_read(tevs, TEVS_AE_AUTO_EXP_TIME_UPPER, exp, 4);
+	ctrl_def = min_t(u32, be32_to_cpup((__be32 *)exp), 0x7fffffffU);
+	if (ret)
+		goto error;
+	ctrl_cfg = tevs_ae_exp_upper_ctrl;
+	ctrl_cfg.min = exp_ctrl_min;
+	ctrl_cfg.max = exp_ctrl_max;
+	ctrl_cfg.def = clamp_t(s64, ctrl_def, exp_ctrl_min, exp_ctrl_max);
+	tevs->ae_exp_upper =
+		v4l2_ctrl_new_custom(ctrl_hdlr, &ctrl_cfg, NULL);
+
+	ret = tevs_i2c_read(tevs, TEVS_AE_AUTO_EXP_TIME_MAX, exp, 4);
+	ctrl_def = min_t(u32, be32_to_cpup((__be32 *)exp), 0x7fffffffU);
+	if (ret)
+		goto error;
+	ctrl_cfg = tevs_ae_exp_max_ctrl;
+	ctrl_cfg.min = exp_ctrl_min;
+	ctrl_cfg.max = exp_ctrl_max;
+	ctrl_cfg.def = clamp_t(s64, ctrl_def, exp_ctrl_min, exp_ctrl_max);
+	tevs->ae_exp_max = v4l2_ctrl_new_custom(ctrl_hdlr, &ctrl_cfg, NULL);
 
 	ret = tevs_i2c_read_16b(tevs, TEVS_AE_MANUAL_GAIN, &val);
 	ctrl_def = val & TEVS_AE_MANUAL_GAIN_MASK;
@@ -1721,13 +1867,15 @@ static int tevs_ctrls_init(struct tevs *tevs)
 	/* By default, link_freq and pixel_rate is read only */
 	tevs->link_freq = v4l2_ctrl_new_int_menu(
 		ctrl_hdlr, &tevs_ctrl_ops, V4L2_CID_LINK_FREQ,
-		ARRAY_SIZE(tevs_link_freqs) - 1, 0, tevs_link_freqs);
+		ARRAY_SIZE(tevs->link_freq_menu) - 1, 0,
+		tevs->link_freq_menu);
 	tevs->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	tevs->pixel_rate =
 		v4l2_ctrl_new_std(ctrl_hdlr, &tevs_ctrl_ops,
-				  V4L2_CID_PIXEL_RATE, tevs_pixel_rates[0],
-				  tevs_pixel_rates[0], 1, tevs_pixel_rates[0]);
+				  V4L2_CID_PIXEL_RATE, tevs->pixel_rate_value,
+				  tevs->pixel_rate_value, 1,
+				  tevs->pixel_rate_value);
 	tevs->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	tevs->bsl = v4l2_ctrl_new_custom(ctrl_hdlr, &tevs_bsl_mode, NULL);
@@ -1823,6 +1971,7 @@ static int tevs_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct v4l2_mbus_framefmt *fmt;
 	struct fwnode_handle *ep;
+	u64 endpoint_link_freq = 0;
 	int i = ARRAY_SIZE(tevs_sensor_table);
 	int ret;
 
@@ -1929,14 +2078,82 @@ static int tevs_probe(struct i2c_client *client)
 	tevs->bus_cfg.bus_type = V4L2_MBUS_CSI2_DPHY;
 
 	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &tevs->bus_cfg);
+	fwnode_handle_put(ep);
 	if (ret < 0) {
 		dev_err(dev, "Failed to parse bus configuration\n");
+		v4l2_fwnode_endpoint_free(&tevs->bus_cfg);
 		return ret;
 	}
 
-	if (tevs_try_on(tevs) != 0) {
+	if (tevs->bus_cfg.bus.mipi_csi2.num_data_lanes) {
+		if (of_find_property(dev->of_node, "data-lanes", NULL) &&
+		    tevs->data_lanes !=
+		    tevs->bus_cfg.bus.mipi_csi2.num_data_lanes)
+			dev_warn(dev,
+				 "legacy data-lanes=%d differs from endpoint=%u; using endpoint\n",
+				 tevs->data_lanes,
+				 tevs->bus_cfg.bus.mipi_csi2.num_data_lanes);
+		tevs->data_lanes = tevs->bus_cfg.bus.mipi_csi2.num_data_lanes;
+	}
+	if (tevs->data_lanes < 1 || tevs->data_lanes > 4) {
+		ret = dev_err_probe(dev, -EINVAL,
+				    "endpoint must define 1 to 4 data lanes\n");
+		v4l2_fwnode_endpoint_free(&tevs->bus_cfg);
+		return ret;
+	}
+
+	tevs->continuous_clock =
+		!(tevs->bus_cfg.bus.mipi_csi2.flags &
+		  V4L2_MBUS_CSI2_NONCONTINUOUS_CLOCK);
+
+	if (tevs->bus_cfg.nr_of_link_frequencies > 1) {
+		ret = dev_err_probe(dev, -EINVAL,
+				    "exactly one link-frequency is supported\n");
+		v4l2_fwnode_endpoint_free(&tevs->bus_cfg);
+		return ret;
+	}
+	if (tevs->bus_cfg.nr_of_link_frequencies == 1)
+		endpoint_link_freq = tevs->bus_cfg.link_frequencies[0];
+
+	if (endpoint_link_freq) {
+		u32 endpoint_data_frequency =
+			div_u64(endpoint_link_freq * 2, 1000000);
+
+		if (endpoint_link_freq < 50000000ULL ||
+		    endpoint_link_freq > 600000000ULL) {
+			ret = dev_err_probe(dev, -EINVAL,
+					    "link-frequency is outside the TEVS 100-1200 Mbps range\n");
+			v4l2_fwnode_endpoint_free(&tevs->bus_cfg);
+			return ret;
+		}
+		if (tevs->data_frequency &&
+		    tevs->data_frequency != endpoint_data_frequency)
+			dev_warn(dev,
+				 "legacy data-frequency=%d differs from endpoint link-frequency=%llu; using endpoint\n",
+				 tevs->data_frequency,
+				 (unsigned long long)endpoint_link_freq);
+		tevs->data_frequency = endpoint_data_frequency;
+		tevs->link_freq_menu[0] = endpoint_link_freq;
+	} else {
+		if (!tevs->data_frequency)
+			tevs->data_frequency = 800;
+		tevs->link_freq_menu[0] =
+			(s64)tevs->data_frequency * 1000000 / 2;
+	}
+
+	/* UYVY is 16 bits per pixel; CSI-2 transfers on both clock edges. */
+	tevs->pixel_rate_value = div_s64(tevs->link_freq_menu[0] * 2 *
+					 tevs->data_lanes, 16);
+	dev_info(dev,
+		 "CSI-2: %d lanes, link %lld Hz, pixel rate %lld, MIPI data rate %d Mbps\n",
+		 tevs->data_lanes, (long long)tevs->link_freq_menu[0],
+		 (long long)tevs->pixel_rate_value, tevs->data_frequency);
+
+	ret = tevs_try_on(tevs);
+	if (ret) {
 		dev_err(dev, "cannot find tevs camera\n");
-		return -EINVAL;
+		v4l2_fwnode_endpoint_free(&tevs->bus_cfg);
+		return ret;
 	}
 
 	mutex_init(&tevs->lock);
@@ -1974,22 +2191,38 @@ static int tevs_probe(struct i2c_client *client)
 	if (ret < 0) {
 		dev_err(dev, "load header information failed\n");
 		goto error_power_off;
+	}
+
+	ret = tevs_get_chip_id(tevs);
+	if (ret < 0)
+		goto error_power_off;
+
+	if (tevs->chip_id == SENSOR_CHIP_ID_NONE) {
+		for (i = 0; i < ARRAY_SIZE(tevs_sensor_table); i++) {
+			if (!strcmp((const char *)tevs->header_info->product_name,
+				    tevs_sensor_table[i].sensor_name))
+				break;
+		}
 	} else {
 		for (i = 0; i < ARRAY_SIZE(tevs_sensor_table); i++) {
-			if (strcmp((const char *)tevs->header_info->product_name,
-				   tevs_sensor_table[i].sensor_name) == 0)
+			if (tevs->chip_id == tevs_sensor_table[i].chip_id)
 				break;
 		}
 	}
 
 	if (i >= ARRAY_SIZE(tevs_sensor_table)) {
-		dev_err(dev, "cannot not support the product: %s\n",
-			(const char *)tevs->header_info->product_name);
-		ret = -EINVAL;
+		if (tevs->chip_id == SENSOR_CHIP_ID_NONE)
+			dev_err(dev, "unsupported product: %s\n",
+				(const char *)tevs->header_info->product_name);
+		else
+			dev_err(dev, "unsupported chip ID: 0x%04x\n",
+				tevs->chip_id);
+		ret = -ENODEV;
 		goto error_power_off;
 	}
-
 	tevs->selected_sensor = i;
+	tevs->selected_mode = 0;
+	tevs->fps = tevs_res_fps(&tevs_sensor_table[i].res_list[0], 0);
 	dev_dbg(dev, "selected_sensor:%d, sensor_name:%s\n", i,
 		tevs->header_info->product_name);
 
@@ -1999,17 +2232,12 @@ static int tevs_probe(struct i2c_client *client)
 	fmt->height =
 		tevs_sensor_table[tevs->selected_sensor].res_list[0].height;
 	fmt->field = V4L2_FIELD_NONE;
-	fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	fmt->code = tevs_sensor_table[tevs->selected_sensor].code_list[0];
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
 	fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt->colorspace);
 	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
 	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
 	memset(fmt->reserved, 0, sizeof(fmt->reserved));
-
-	/* link_freq = (pixel_rate * bpp) / (2 * data_lanes) */
-	tevs_link_freqs[0] =
-		400000000;
-		//(tevs_pixel_rates[0] * 16) / (2 * tevs->data_lanes);
 
 	ret = tevs_ctrls_init(tevs);
 	if (ret) {
