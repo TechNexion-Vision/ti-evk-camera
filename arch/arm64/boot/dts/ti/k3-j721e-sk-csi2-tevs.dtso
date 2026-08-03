@@ -1,207 +1,176 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * DT Overlay for Technexion AR series camera interfaced with CSI2 on J721E-EAIK board.
+ * DT overlay for two TechNexion TEVS/AR-series cameras connected to the
+ * J721E/TDA4VM EAIK CSI-2 ports.
  *
- * Copyright (C) 2024 Technexion Ltd.
- *
+ * Copyright (C) 2024 TechNexion Ltd.
  */
-
 /dts-v1/;
 /plugin/;
-
 #include <dt-bindings/gpio/gpio.h>
 #include "k3-pinctrl.h"
-
 &main_pmx0 {
 	main_rpi_cam0_pins_default: main-rpi-cam0-pins-default {
 		pinctrl-single,pins = <
-			J721E_IOPAD(0x1D4, PIN_OUTPUT, 7) /* (Y3) SPI1_CS0 */
-			J721E_IOPAD(0x1D8, PIN_OUTPUT, 7) /* (W4) SPI1_CS1 */
-
+			J721E_IOPAD(0x1d4, PIN_OUTPUT, 7) /* (Y3) SPI1_CS0 */
+			J721E_IOPAD(0x1d8, PIN_OUTPUT, 7) /* (W4) SPI1_CS1 */
 		>;
 	};
-
 	main_rpi_cam1_pins_default: main-rpi-cam1-pins-default {
 		pinctrl-single,pins = <
-			J721E_IOPAD(0x1E0, PIN_OUTPUT, 7) /* (Y5) SPI1_D0 */
-			J721E_IOPAD(0x1E4, PIN_OUTPUT, 7) /* (Y2) SPI1_D1 */
-
+			J721E_IOPAD(0x1e0, PIN_OUTPUT, 7) /* (Y5) SPI1_D0 */
+			J721E_IOPAD(0x1e4, PIN_OUTPUT, 7) /* (Y2) SPI1_D1 */
 		>;
 	};
 };
-
 &csi_mux {
-    idle-state = <1>;
+	idle-state = <1>;
 };
-
 &cam0_i2c {
 	#address-cells = <1>;
 	#size-cells = <0>;
-
-	pca9554_0: pca9554_0@21 {
+	pca9554_0: gpio@21 {
 		compatible = "nxp,pca9554";
 		reg = <0x21>;
 		gpio-controller;
 		#gpio-cells = <2>;
 		status = "okay";
 	};
-
-	tevs@48 {
+	tevs_0: camera@48 {
 		compatible = "tn,tevs";
 		reg = <0x48>;
-
 		pinctrl-names = "default";
 		pinctrl-0 = <&main_rpi_cam0_pins_default>;
-
-		host-power-gpios = <&main_gpio0 116 GPIO_ACTIVE_HIGH>;
+		/* J721E-EAIK board-specific GPIO routing. */
+		host-pwdn-gpios = <&main_gpio0 116 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&main_gpio0 117 GPIO_ACTIVE_HIGH>;
 		standby-gpios = <&pca9554_0 2 GPIO_ACTIVE_HIGH>;
-
+		/* Compatibility properties for the older TI TEVS driver. */
 		data-lanes = <2>;
 		data-frequency = <800>;
 		continuous-clock = <0>;
 		status = "okay";
-
 		port {
 			csi2_cam0: endpoint {
 				remote-endpoint = <&csi2rx0_in_sensor>;
 				clock-lanes = <0>;
 				data-lanes = <1 2>;
 				link-frequencies = /bits/ 64 <400000000>;
+				clock-noncontinuous;
 			};
 		};
 	};
 };
-
 &cam1_i2c {
 	#address-cells = <1>;
 	#size-cells = <0>;
-
-	pca9554_1: pca9554_1@21 {
+	pca9554_1: gpio@21 {
 		compatible = "nxp,pca9554";
 		reg = <0x21>;
 		gpio-controller;
 		#gpio-cells = <2>;
 		status = "okay";
 	};
-
-	tevs@48 {
+	tevs_1: camera@48 {
 		compatible = "tn,tevs";
 		reg = <0x48>;
-
 		pinctrl-names = "default";
 		pinctrl-0 = <&main_rpi_cam1_pins_default>;
-
-		host-power-gpios = <&main_gpio0 119 GPIO_ACTIVE_HIGH>;
+		/* J721E-EAIK board-specific GPIO routing. */
+		host-pwdn-gpios = <&main_gpio0 119 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&main_gpio0 120 GPIO_ACTIVE_HIGH>;
 		standby-gpios = <&pca9554_1 2 GPIO_ACTIVE_HIGH>;
-
+		/* Compatibility properties for the older TI TEVS driver. */
 		data-lanes = <2>;
 		data-frequency = <800>;
 		continuous-clock = <0>;
 		status = "okay";
-
 		port {
 			csi2_cam1: endpoint {
 				remote-endpoint = <&csi2rx1_in_sensor>;
 				clock-lanes = <0>;
 				data-lanes = <1 2>;
 				link-frequencies = /bits/ 64 <400000000>;
+				clock-noncontinuous;
 			};
 		};
 	};
 };
-
 &cdns_csi2rx0 {
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
-
 		csi0_port0: port@0 {
 			reg = <0>;
 			status = "okay";
-
 			csi2rx0_in_sensor: endpoint {
 				remote-endpoint = <&csi2_cam0>;
-				bus-type = <4>; /* CSI2 DPHY. */
+				bus-type = <4>; /* MIPI CSI-2 D-PHY */
 				clock-lanes = <0>;
 				data-lanes = <1 2>;
+				clock-noncontinuous;
 			};
 		};
-
 		csi0_port1: port@1 {
 			reg = <1>;
 			status = "disabled";
 		};
-
 		csi0_port2: port@2 {
 			reg = <2>;
 			status = "disabled";
 		};
-
 		csi0_port3: port@3 {
 			reg = <3>;
 			status = "disabled";
 		};
-
 		csi0_port4: port@4 {
 			reg = <4>;
 			status = "disabled";
 		};
 	};
 };
-
 &dphy0 {
 	status = "okay";
 };
-
 &ti_csi2rx0 {
 	status = "okay";
 };
-
 &cdns_csi2rx1 {
 	ports {
 		#address-cells = <1>;
 		#size-cells = <0>;
-
 		csi1_port0: port@0 {
 			reg = <0>;
 			status = "okay";
-
 			csi2rx1_in_sensor: endpoint {
 				remote-endpoint = <&csi2_cam1>;
-				bus-type = <4>; /* CSI2 DPHY. */
+				bus-type = <4>; /* MIPI CSI-2 D-PHY */
 				clock-lanes = <0>;
 				data-lanes = <1 2>;
+				clock-noncontinuous;
 			};
 		};
-
 		csi1_port1: port@1 {
 			reg = <1>;
 			status = "disabled";
 		};
-
 		csi1_port2: port@2 {
 			reg = <2>;
 			status = "disabled";
 		};
-
 		csi1_port3: port@3 {
 			reg = <3>;
 			status = "disabled";
 		};
-
 		csi1_port4: port@4 {
 			reg = <4>;
 			status = "disabled";
 		};
 	};
 };
-
 &dphy1 {
 	status = "okay";
 };
-
 &ti_csi2rx1 {
 	status = "okay";
 };
