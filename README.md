@@ -35,23 +35,19 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
    **Fig. 1.1** The TEV-RPI22 adaptor connection with SK-AM62A-LP Starter Kit.
    <br/>
 3. ### **Yocto Pre-built image** <br/>
-   The release driver have been verified with those ti-processor-sdk-linux version:
+   <!--The release driver have been verified with those ti-processor-sdk-linux version:-->
    * For **SK-AM62** :<br/>
-    [tisdk-default-image-am62xx-evm.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-PvdSyIiioq/10.00.07.04/tisdk-default-image-am62xx-evm.rootfs.wic.xz)
-      <sub>(Version: 10.00.07.04 Release date: 14 Aug 2024)</sub><br/>
-    `xz -d tisdk-default-image-am62xx-evm.wic.xz`<br/>
+    [tisdk-default-image-am62xx-evm-12.01.00.05.03.rootfs.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-PvdSyIiioq/10.00.07.04/tisdk-default-image-am62xx-evm.rootfs.wic.xz)
+      <sub>(Version: 12.01.00.05.03 Release date: 31 Jul 2026)</sub><br/>
+    `xz -d tisdk-default-image-am62xx-evm-12.01.00.05.03.rootfs.wic.xz`<br/>
    * For **SK-AM62A-LP** :<br/>
-    [tisdk-edgeai-image-am62axx-evm.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-D37Ls3JjkT/10.00.00.08/tisdk-edgeai-image-am62a-evm.wic.xz)
-      <sub>(Version: 10.00.00.08 Release date: 19 Aug 2024)</sub><br/>
-     `xz -d tisdk-edgeai-image-am62axx-evm.wic.xz`<br/>
+    [tisdk-edgeai-image-am62a-evm-11.01.07.05.rootfs.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-D37Ls3JjkT/11.01.07.05/tisdk-edgeai-image-am62a-evm-11.01.07.05.rootfs.wic.xz)
+      <sub>(Version: 11.01.07.05 Release date: 1 Aug 2025)</sub><br/>
+     `xz -d tisdk-edgeai-image-am62a-evm-11.01.07.05.rootfs.wic.xz`<br/>
    * For **SK-TDA4VM** :<br/>
-    [tisdk-edgeai-image-j721e-evm.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-4K6R4tqhZI/10.01.00.04/tisdk-edgeai-image-j721e-evm.wic.xz)
-      <sub>(Version: 10.01.00.04 Release date: 18 Dec 2024)</sub><br/>
+    [tisdk-edgeai-image-j721e-evm.wic.xz](https://dr-download.ti.com/software-development/software-development-kit-sdk/MD-4K6R4tqhZI/11.00.00.08/tisdk-edgeai-image-j721e-evm.wic.xz)
+      <sub>(Version: 11.00.00.08 Release date: 22 May 2025)</sub><br/>
      `xz -d tisdk-edgeai-image-j721e-evm.wic.xz`<br/>
-
-> [!NOTE]
-> If you don't have any specific driver need, you can using **[TechNexion Pre-built Image](https://developer.technexion.com/beta/docs/ti-sk-kit-tevs-camera-usage-guide#using-technexion-prebuilt-image)**<br/>
-> Skip step of driver install and start to using camera quickly !<br/>
 
 4. ### **Micro-SD Card** <br/>
    The capacity must be higher 16GB and then flash the image.<br/>
@@ -63,7 +59,7 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
     ```shell
     $ git clone git@github.com:TechNexion-Vision/ti_evk_camera.git
     $ cd ti_evk_camera/
-    ~/ti_evk_camera$ git checkout tn-ti_6.6.32_10.00
+    ~/ti_evk_camera$ git checkout tn-ti_6.12.35_11.01.07.05
     ```
 2. ### **Copy to your kernel source code.**
     ```shell
@@ -91,11 +87,11 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
     Add this part under "Camera sensor devices" menu in Kconfig.
     ```
     config VIDEO_TEVS
-      tristate "TechNexion TEVS sensor support"
+    tristate "TechNexion TEVS sensor support"
       depends on OF
-      depends on GPIOLIB && VIDEO_V4L2 && I2C && VIDEO_V4L2_SUBDEV_API
-      depends on MEDIA_CAMERA_SUPPORT
-      default y
+      depends on GPIOLIB && VIDEO_DEV && I2C
+      select MEDIA_CONTROLLER
+      select VIDEO_V4L2_SUBDEV_API
       select V4L2_FWNODE
       help
         This is a Video4Linux2 sensor driver for the TechNexion
@@ -129,7 +125,7 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
     > # For SK-AM62A
     >   name_overlays= ti/k3-am62a7-sk-csi2-tevs.dtbo
     > # For SK-TDA4VM
-    >   name_overlays= ti/k3-j721e-edgeai-apps.dtbo ti/k3-j721e-sk-tevs.dtbo
+    >   name_overlays= ti/k3-j721e-sk-csi2-tevs.dtbo
     > ```
 
 ## Instructions for Testing Camera
@@ -161,16 +157,29 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
    The following is an example.<br/><br/>
    <img src="https://github.com/user-attachments/assets/16646398-639c-45c3-b9be-4d7b9bbb95eb" width="30%"><br/>
 4. ### Get video stream on the display :<br/>
-   Specify the capture device you just get (/dev/video2) and start gstreamer to get video stream with 640x480 on the display :
+   Bring up the camera (/dev/video2) with **3840x2160** at **10 FPS** scaled to **1920x1080** by Gstreamer pipeline :
    ```shell
-   $ gst-launch-1.0 v4l2src device=/dev/video2 io-mode=2 ! video/x-raw,width=640,height=480 ! waylandsink sync=false
+   media-ctl -d /dev/media1 -V \
+   '"tevs 7-0048":0 [fmt:UYVY8_1X16/3840x2160@1/10 field:none]'
+   
+   media-ctl -d /dev/media1 -V \
+   '"4510000.ticsi2rx":0/0 [fmt:UYVY8_1X16/3840x2160 field:none]'
+   
+   gst-launch-1.0 -v \
+     v4l2src device=/dev/video2 ! \
+     'video/x-raw,format=UYVY,width=3840,height=2160' ! \
+     videoscale ! \
+     'video/x-raw,format=UYVY,width=1920,height=1080' ! \
+     fpsdisplaysink \
+       video-sink="kmssink force-modesetting=true" \
+       sync=false text-overlay=true
    ```
    
 ## Troubleshooting
 
 > [!NOTE]
 > **Usecase**<br/>
-> Take TEVS-AR0234 on SK-TDA4VM CAM2 connector for example:
+> Take **TEVS-AR1335** on **SK-TDA4VM CAM2** connector for example:
 
   ### Find out the Camera<br/>
   <br/>
@@ -184,10 +193,12 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
 
    The message similar to the following :<br/>
 
-   > root@tda4vm-sk:/opt/edgeai-gst-apps# dmesg|grep tevs<br/>
-   > tevs 7-0048: tevs_probe() device node: tevs@48<br/>
-   > tevs 7-0048: Version:24.8.0.1<br/>
-   > tevs 7-0048: Product:TEVS-AR0234, HeaderVer:3, MIPI_Rate:800<br/>
+   > root@j721e-evm:/opt/edgeai-gst-apps# dmesg | grep tevs<br/>
+   > tevs 7-0048: tevs_probe() device node: camera@48<br/>
+   > tevs 7-0048: CSI-2: 2 lanes, link 400000000 Hz, pixel rate 100000000, MIPI data rate 800 Mbps<br/>
+   > tevs 7-0048: Version:26.4.0.3<br/>
+   > tevs 7-0048: Product:TEVM-AR1335, HeaderVer:3, MIPI_Rate:800<br/>
+   > tevs 7-0048: chip ID: 0x0153<br/>
    > tevs 7-0048: probe success<br/>
 
    Try to using media-ctl framework to print the device topology from camera to CSI and the end to video device node.
@@ -211,11 +222,17 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
       > Size Range: 640x480 - 640x480<br/>
       > Size Range: 1280x720 - 1280x720<br/>
       > Size Range: 1920x1080 - 1920x1080<br/>
-      > Size Range: 1920x1200 - 1920x1200<br/>
+      > Size Range: 2560x1440 - 2560x1440<br/>
+      > Size Range: 3840x2160 - 3840x2160<br/>
+      > Size Range: 4208x3120 - 4208x3120<br/>
 
   2. #### Set Format
       ```shell
-       media-ctl --set-v4l2 "'tevs 7-0048':0 [fmt:UYVY8_2X8/1280X720@1/30 field:none]"
+      media-ctl -d /dev/media1 -V \
+      '"tevs 7-0048":0 [fmt:UYVY8_1X16/3840x2160@1/10 field:none]'
+      
+      media-ctl -d /dev/media1 -V \
+      '"4510000.ticsi2rx":0/0 [fmt:UYVY8_1X16/3840x2160 field:none]'
       ```
 
   <br/>
