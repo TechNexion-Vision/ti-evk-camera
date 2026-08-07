@@ -42,6 +42,7 @@
 				data-lanes = <4>;
 				data-frequency = <800>;
 				continuous-clock = <0>;
+                supports-over-4k-res;
 				status = "okay";
 				port {
 					csi2_cam0: endpoint {
