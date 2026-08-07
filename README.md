@@ -128,7 +128,7 @@ Driver has been developed by TechNexion as an initiative in order to bootup Tech
     >   name_overlays= ti/k3-j721e-sk-csi2-tevs.dtbo
     > ```
 
-## Instructions for Testing Camera
+## Instructions for Testing Camera on SK-TDA4VM EVK
 
 1. ### Connect debug console cable to SK-TDA4VM.
 2. ### Power on the board :
