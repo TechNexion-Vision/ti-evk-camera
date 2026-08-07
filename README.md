@@ -1,4 +1,4 @@
-# TI TI Evaluation Kits Camera Driver
+# TI Evaluation Kits Camera Driver
 
 [![TEVS Banner](https://github.com/user-attachments/assets/02219e99-b031-4a44-84c3-75277ed1a4ec)](https://www.technexion.com/products/embedded-vision/)
 
